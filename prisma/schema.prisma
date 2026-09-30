@@ -1,0 +1,441 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  IO
+  SHO
+  FORENSIC_EXPERT
+  PROSECUTOR
+  JUDGE_AUDITOR
+  ADMIN
+}
+
+enum Classification {
+  PUBLIC
+  INTERNAL
+  CONFIDENTIAL
+  RESTRICTED
+  PROTECTED_VICTIM_WITNESS
+}
+
+enum CaseStatus {
+  OPEN
+  UNDER_INVESTIGATION
+  FOR_PROSECUTION
+  FILED
+  ARCHIVED
+}
+
+enum DocumentType {
+  FIR
+  POLICE_REPORT
+  WITNESS_STATEMENT
+  CHARGE_SHEET
+  FORENSIC_REPORT
+  EVIDENCE_RECORD
+  COURT_FILING
+  NOTICE
+  JUDGMENT
+  COMPLAINT
+  ARREST_MEMO
+  SEIZURE_MEMO_PANCHNAMA
+  MEDICAL_REPORT
+  CONFESSION_STATEMENT
+  REMAND_APPLICATION
+  BAIL_ORDER
+  CLOSURE_REPORT
+  OTHER
+}
+
+enum DocumentStatus {
+  PROCESSING
+  MANUAL_REVIEW
+  APPROVED
+  SHARED
+  FILED
+  ARCHIVED
+}
+
+enum SignatureStatus {
+  UNSIGNED
+  SIMULATED_SIGNED
+  INVALID
+  MISSING
+}
+
+enum AnchorStatus {
+  PENDING
+  ANCHORED
+  MISMATCH
+}
+
+enum ScanStatus {
+  PENDING
+  CLEAN
+  FLAGGED
+  SKIPPED_DEMO
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  ROLE_SWITCH
+  ACCESS_ALLOWED
+  ACCESS_DENIED
+  UPLOAD
+  VIEW
+  DOWNLOAD
+  SHARE
+  APPROVAL
+  CUSTODY_TRANSFER
+  INTEGRITY_VERIFICATION
+  AI_QUERY
+  EXPORT
+  PURGE
+  ADD_EXHIBIT
+  UPDATE_EXHIBIT
+}
+
+enum AuditResult {
+  SUCCESS
+  DENIED
+  ERROR
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         Role
+  station      String?
+  department   String?
+  mfaEnabled   Boolean  @default(true)
+  totpSecret   String?
+  isDemo       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  assignments       CaseAssignment[]
+  auditLogs         AuditLog[]           @relation("ActorLogs")
+  documents         Document[]
+  custodyEvents     CustodyEvent[]
+  sessions          Session[]
+  ocrRevisions      OcrRevision[]
+  recoveredExhibits PhysicalExhibit[]    @relation("RecoveredExhibits")
+  exhibitImages     ExhibitImage[]
+  exhibitTransfers  ExhibitTransferLog[]
+}
+
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  ip        String
+  success   Boolean
+  timestamp DateTime @default(now())
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  jti       String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CaseRecord {
+  id             String         @id @default(cuid())
+  caseNumber     String         @unique
+  cctnsRef       String?
+  firNumber      String?
+  title          String
+  station        String
+  status         CaseStatus     @default(UNDER_INVESTIGATION)
+  classification Classification @default(CONFIDENTIAL)
+  summary        String
+  fictionalNote  String         @default("FICTIONAL DEMO DATA. No real persons, stations, or incidents.")
+  createdAt      DateTime       @default(now())
+
+  assignments      CaseAssignment[]
+  documents        Document[]
+  aiSummaries      AiSummary[]
+  physicalExhibits PhysicalExhibit[]
+}
+
+model CaseAssignment {
+  id        String   @id @default(cuid())
+  userId    String
+  caseId    String
+  purpose   String   @default("investigation")
+  createdAt DateTime @default(now())
+
+  user User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  case CaseRecord @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, caseId])
+}
+
+model AccessPolicy {
+  id                 String         @id @default(cuid())
+  role               Role           @unique
+  requiresAssignment Boolean        @default(true)
+  readOnly           Boolean        @default(false)
+  purposeRequired    Boolean        @default(true)
+  maxClassification  Classification
+  notes              String
+}
+
+model Document {
+  id              String          @id @default(cuid())
+  caseId          String
+  type            DocumentType
+  title           String
+  classification  Classification
+  ownerDepartment String
+  status          DocumentStatus  @default(PROCESSING)
+  currentVersion  Int             @default(0)
+  uploadedById    String
+  signatureStatus SignatureStatus @default(UNSIGNED)
+  anchorStatus    AnchorStatus    @default(PENDING)
+  legalHold       Boolean         @default(true)
+  retentionState  String          @default("LEGAL_HOLD")
+  accessPolicy    String          @default("ASSIGNED_CASE_ONLY")
+  createdAt       DateTime        @default(now())
+
+  case           CaseRecord        @relation(fields: [caseId], references: [id])
+  uploadedBy     User              @relation(fields: [uploadedById], references: [id])
+  versions       DocumentVersion[]
+  ocrExtractions OcrExtraction[]
+  custodyEvents  CustodyEvent[]
+  shareTokens    ShareToken[]
+  chunks         DocumentChunk[]
+  ocrJob         OcrJob?
+}
+
+model DocumentVersion {
+  id              String     @id @default(cuid())
+  documentId      String
+  version         Int
+  storageKey      String
+  sha256Hash      String
+  prevVersionHash String?
+  ledgerProofId   String?
+  scanStatus      ScanStatus @default(PENDING)
+  mimeType        String
+  byteSize        Int
+  originalName    String
+  createdAt       DateTime   @default(now())
+
+  document Document       @relation(fields: [documentId], references: [id])
+  ocrData  OcrExtraction?
+
+  @@unique([documentId, version])
+}
+
+/// Append-only application hash chain. This is NOT a blockchain.
+model LedgerEvent {
+  id           String   @id @default(cuid())
+  sequence     Int      @unique
+  prevHash     String
+  eventHash    String
+  timestamp    DateTime @default(now())
+  actorId      String?
+  eventType    String
+  documentId   String?
+  versionId    String?
+  proofId      String   @unique
+  metadataJson String   @default("{}")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?
+  role       String
+  action     AuditAction
+  caseId     String?
+  documentId String?
+  ip         String?
+  userAgent  String?
+  result     AuditResult
+  reason     String?
+  metadata   String      @default("{}")
+  createdAt  DateTime    @default(now())
+
+  actor User? @relation("ActorLogs", fields: [actorId], references: [id])
+}
+
+model ShareToken {
+  id             String   @id @default(cuid())
+  token          String   @unique
+  documentId     String
+  recipient      String
+  purpose        String
+  expiresAt      DateTime
+  viewOnly       Boolean  @default(true)
+  redactedFields String?
+  revoked        Boolean  @default(false)
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id])
+}
+
+model OcrExtraction {
+  id            String    @id @default(cuid())
+  documentId    String
+  version       Int
+  rawText       String // Full text for search indexing
+  confidence    Float // e.g., 0.85
+  extractedData String // JSON containing fields (caseNumber, date, names)
+  reviewedById  String?
+  reviewedAt    DateTime?
+  status        String    @default("PENDING") // PENDING, APPROVED
+  createdAt     DateTime  @default(now())
+
+  document        Document        @relation(fields: [documentId], references: [id])
+  documentVersion DocumentVersion @relation(fields: [documentId, version], references: [documentId, version])
+  revisions       OcrRevision[]
+
+  @@unique([documentId, version])
+}
+
+model OcrRevision {
+  id              String   @id @default(cuid())
+  ocrExtractionId String
+  previousData    String
+  updatedData     String
+  reviewedById    String
+  createdAt       DateTime @default(now())
+
+  ocrExtraction OcrExtraction @relation(fields: [ocrExtractionId], references: [id], onDelete: Cascade)
+  reviewedBy    User          @relation(fields: [reviewedById], references: [id])
+}
+
+model CustodyEvent {
+  id            String   @id @default(cuid())
+  documentId    String
+  actorId       String
+  toDepartment  String
+  reason        String
+  signatureRef  String // Simulated digital signature hash (DSC)
+  ledgerProofId String? // Reference to the hash-anchored ledger event
+  createdAt     DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id])
+  actor    User     @relation(fields: [actorId], references: [id])
+}
+
+model DocumentChunk {
+  id         String   @id @default(cuid())
+  documentId String
+  text       String
+  embedding  String // JSON stringified array of floats
+  createdAt  DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+model AiSummary {
+  id         String   @id @default(cuid())
+  caseId     String
+  summary    String
+  promptHash String?
+  status     String   @default("UNVERIFIED") // UNVERIFIED, VERIFIED
+  createdAt  DateTime @default(now())
+
+  case CaseRecord @relation(fields: [caseId], references: [id], onDelete: Cascade)
+}
+
+model OcrJob {
+  id         String   @id @default(cuid())
+  documentId String   @unique
+  status     String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  attempts   Int      @default(0)
+  error      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+enum ExhibitStatus {
+  IN_CUSTODY
+  AT_FSL
+  IN_COURT
+  DISPOSED
+}
+
+enum ExhibitCategory {
+  NARCOTICS
+  FIREARM
+  CURRENCY
+  BIOLOGICAL
+  DOCUMENT
+  ELECTRONIC
+  OTHER
+}
+
+model PhysicalExhibit {
+  id               String          @id @default(cuid())
+  caseId           String
+  exhibitNumber    String
+  category         ExhibitCategory @default(OTHER)
+  description      String
+  serialNumber     String?
+  identifyingMarks String?
+
+  // Acquisition Details
+  recoveryDate        DateTime?
+  recoveryLocation    String?
+  recoveringOfficerId String?
+  sourcePerson        String?
+  witnesses           String?
+
+  // Status & Storage
+  status              ExhibitStatus @default(IN_CUSTODY)
+  currentLocation     String
+  storageRequirements String?
+
+  // Retention
+  disposalEligibilityDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  case              CaseRecord           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  recoveringOfficer User?                @relation("RecoveredExhibits", fields: [recoveringOfficerId], references: [id])
+  images            ExhibitImage[]
+  transferLogs      ExhibitTransferLog[]
+}
+
+model ExhibitImage {
+  id           String   @id @default(cuid())
+  exhibitId    String
+  url          String // Path or URL to the storage bucket
+  uploadedAt   DateTime @default(now())
+  uploadedById String
+
+  exhibit    PhysicalExhibit @relation(fields: [exhibitId], references: [id], onDelete: Cascade)
+  uploadedBy User            @relation(fields: [uploadedById], references: [id])
+}
+
+model ExhibitTransferLog {
+  id           String   @id @default(cuid())
+  exhibitId    String
+  actorId      String
+  action       String // e.g. "CHECK_OUT", "CHECK_IN", "TRANSFER"
+  fromLocation String?
+  toLocation   String?
+  reason       String?
+  timestamp    DateTime @default(now())
+
+  exhibit PhysicalExhibit @relation(fields: [exhibitId], references: [id], onDelete: Cascade)
+  actor   User            @relation(fields: [actorId], references: [id])
+}

@@ -1,0 +1,22 @@
+FROM node:20-bullseye-slim
+
+# Install Tesseract for OCR
+RUN apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-eng && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy package info and install
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy the rest of the application
+COPY . .
+
+# Run as non-root user for security (sandboxing)
+RUN chown -R node:node /app
+USER node
+
+# Generate Prisma client
+RUN npx prisma generate
+
+ENTRYPOINT ["npx", "tsx", "scripts/ocr-worker.ts"]
